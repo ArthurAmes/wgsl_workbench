@@ -14,5 +14,5 @@ var backSampler: sampler;
 @fragment
 fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let texcoords = pos.xy/res.xy;
-    return textureSample(videoBuffer, videoSampler, texcoords);
+    return vec4f(texcoords.x, texcoords.y, 0., 1.);
 }

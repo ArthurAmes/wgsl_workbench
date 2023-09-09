@@ -1,7 +1,7 @@
 // Much of this code is boilerplate shamelessly stolen from https://sotrh.github.io/learn-wgpu
 
 use parking_lot::RwLock;
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
 use wgpu::{
     self, include_wgsl, util::DeviceExt, BindGroupLayoutDescriptor, Buffer, Extent3d,
@@ -23,6 +23,25 @@ pub struct RenderPipelineContext {
     pub validation_errors: Arc<RwLock<Vec<ValidationError>>>,
 }
 
+fn read_frag_shader(path: &str) -> io::Result<String> {
+    let frag_str = std::fs::read_to_string(path)?;
+    const PRELUDE: &str = "
+    @group(0) @binding(0)
+    var<uniform> res: vec2<f32>;
+    @group(0) @binding(1)
+    var<uniform> frame: u32;
+    @group(0) @binding(2)
+    var videoBuffer: texture_2d<f32>;
+    @group(0) @binding(3)
+    var videoSampler: sampler;
+    @group(1) @binding(0)
+    var backBuffer: texture_2d<f32>;
+    @group(1) @binding(1)
+    var backSampler: sampler;";
+
+    Ok([PRELUDE, &frag_str].join("\n"))
+}
+
 impl RenderPipelineContext {
     pub async fn rebuild_pipeline(lock: Arc<RwLock<Self>>, frag_path: &str) {
         let read = lock.read();
@@ -33,22 +52,7 @@ impl RenderPipelineContext {
                 source: wgpu::ShaderSource::Wgsl(include_str!("vert_default.wgsl").into()),
             });
 
-        if let Ok(frag_str) = std::fs::read_to_string(frag_path) {
-            const PRELUDE: &str = "@group(0) @binding(0)
-var<uniform> res: vec2<f32>;
-@group(0) @binding(1)
-var<uniform> frame: u32;
-@group(0) @binding(2)
-var videoBuffer: texture_2d<f32>;
-@group(0) @binding(3)
-var videoSampler: sampler;
-@group(1) @binding(0)
-var backBuffer: texture_2d<f32>;
-@group(1) @binding(1)
-var backSampler: sampler;";
-
-            let frag_str = [PRELUDE, &frag_str].join("\n");
-
+        if let Ok(frag_str) = read_frag_shader(frag_path) {
             let frag = unsafe {
                 read.device
                     .create_shader_module_unchecked(wgpu::ShaderModuleDescriptor {
@@ -227,7 +231,7 @@ impl App {
     }
 
     // Creating some of the wgpu types requires async code
-    pub async fn new(window: Window, camera_dim: (u32, u32)) -> Self {
+    pub async fn new(window: Window, camera_dim: (u32, u32), frag_file: &String) -> Self {
         let size = window.inner_size();
 
         // The instance is a handle to our GPU
@@ -476,8 +480,42 @@ impl App {
                 push_constant_ranges: &[],
             });
 
+        let validation_errors = Arc::new(RwLock::new(vec![]));
+        let c_validation_errors = validation_errors.clone();
+
+        device.on_uncaptured_error(Box::new(move |e| match e {
+            wgpu::Error::OutOfMemory { .. } => panic!("Device out of memory!"),
+            wgpu::Error::Validation { description, .. } => {
+                println!("validation error! {:}", description);
+                c_validation_errors
+                    .write()
+                    .push(ValidationError { description });
+            }
+        }));
+
+        let frag = match read_frag_shader(&frag_file) {
+            Ok(s) => {
+                let frag = unsafe {
+                    device.create_shader_module_unchecked(wgpu::ShaderModuleDescriptor {
+                        label: Some("Fragment Shader"),
+                        source: wgpu::ShaderSource::Wgsl(s.into()),
+                    })
+                };
+
+                if validation_errors.read().len() > 0 {
+                    let mut ve_wr = validation_errors.write();
+                    while ve_wr.len() > 0 {
+                        println!("Validation Error: {:}", ve_wr.pop().unwrap().description);
+                    }
+                    device.create_shader_module(include_wgsl!("frag_default.wgsl"))
+                } else {
+                    frag
+                }
+            }
+            Err(_) => device.create_shader_module(include_wgsl!("frag_default.wgsl")),
+        };
+
         let vert = device.create_shader_module(include_wgsl!("vert_default.wgsl"));
-        let frag = device.create_shader_module(include_wgsl!("frag_default.wgsl"));
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
@@ -518,19 +556,6 @@ impl App {
             },
             multiview: None, // 5.
         });
-
-        let validation_errors = Arc::new(RwLock::new(vec![]));
-        let c_validation_errors = validation_errors.clone();
-
-        device.on_uncaptured_error(Box::new(move |e| match e {
-            wgpu::Error::OutOfMemory { .. } => panic!("Device out of memory!"),
-            wgpu::Error::Validation { description, .. } => {
-                println!("validation error! {:}", description);
-                c_validation_errors
-                    .write()
-                    .push(ValidationError { description });
-            }
-        }));
 
         let rpctx = Arc::new(RwLock::new(RenderPipelineContext {
             device,

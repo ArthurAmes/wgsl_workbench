@@ -4,7 +4,7 @@ use nokhwa::{
     utils::{CameraIndex, RequestedFormat},
 };
 use parking_lot::RwLock;
-use std::sync::Arc;
+use std::{env, path::Path, sync::Arc};
 
 use appstate::App;
 use hotwatch::{EventKind, Hotwatch};
@@ -38,19 +38,33 @@ pub async fn run() {
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new().build(&event_loop).unwrap();
 
-    let app = Arc::new(RwLock::new(App::new(window, camera_dim).await));
+    let args: Vec<String> = env::args().collect();
+    let file = args
+        .get(1)
+        .expect("Put a WGSL file to watch as the first argument!");
+
+    let app = Arc::new(RwLock::new(App::new(window, camera_dim, file).await));
     let rpctx = app.read().rpcontext.clone();
 
+    if !Path::new(file).exists() {
+        println!("Could not file file: {file}");
+        return;
+    }
+
+    println!("Watching file: {file}");
     let mut watch = Hotwatch::new().expect("Hotwatch failed to init!");
-    let _ = watch.watch("frag.wgsl", move |event: hotwatch::notify::Event| {
-        if let EventKind::Modify(_) = event.kind {
-            println!("File Changed");
-            pollster::block_on(RenderPipelineContext::rebuild_pipeline(
-                rpctx.clone(),
-                "frag.wgsl",
-            ));
-        }
-    });
+    let fcln = file.clone();
+    watch
+        .watch(file, move |event: hotwatch::notify::Event| {
+            if let EventKind::Modify(_) = event.kind {
+                println!("File Changed, recompiling...");
+                pollster::block_on(RenderPipelineContext::rebuild_pipeline(
+                    rpctx.clone(),
+                    &fcln,
+                ));
+            }
+        })
+        .expect("Failed to start watching file!");
 
     event_loop.run(move |event, _, control_flow| {
         let read = app.read();

@@ -30,6 +30,8 @@ pub fn start_audio_capture() {
                 None,
             )
             .expect("failed to create input stream"),
-        _ => todo!()
-    }.play().unwrap();
+        _ => todo!(),
+    }
+    .play()
+    .unwrap();
 }
